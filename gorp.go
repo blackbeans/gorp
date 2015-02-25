@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -177,6 +178,9 @@ type TableMap struct {
 	deletePlan     bindPlan
 	getPlan        bindPlan
 	dbmap          *DbMap
+
+	hashKey *ColumnMap //for sharding
+	shard   Shard      //sharding strategy.
 }
 
 // ResetSql removes cached insert/update/select/delete SQL strings
@@ -212,6 +216,17 @@ func (t *TableMap) SetKeys(isAutoIncr bool, fieldNames ...string) *TableMap {
 	}
 	t.ResetSql()
 
+	return t
+}
+
+func (t *TableMap) SetHashKey(fieldName string) *TableMap {
+	t.hashKey = t.ColMap(fieldName)
+	t.hashKey.isHashKey = true
+	return t
+}
+
+func (t *TableMap) SetShardStrategy(shard Shard) *TableMap {
+	t.shard = shard
 	return t
 }
 
@@ -343,8 +358,9 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 
 		s := bytes.Buffer{}
 		s2 := bytes.Buffer{}
-		s.WriteString(fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
+		//s.WriteString(fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
 
+		tableSuffix := 0
 		x := 0
 		first := true
 		for y := range t.Columns {
@@ -356,6 +372,10 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 						s2.WriteString(",")
 					}
 					s.WriteString(t.dbmap.Dialect.QuoteField(col.ColumnName))
+
+					if col.isHashKey {
+						tableSuffix = t.shard.FindForKey(t.dbmap.Dialect.BindVar(x))
+					}
 
 					if col.isAutoIncr {
 						s2.WriteString(t.dbmap.Dialect.AutoIncrBindValue())
@@ -387,7 +407,7 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.query = s.String()
+		plan.query = fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_"+strconv.Itoa(tableSuffix))) + s.String()
 		t.insertPlan = plan
 	}
 
@@ -564,6 +584,7 @@ type ColumnMap struct {
 	isPK       bool
 	isAutoIncr bool
 	isNotNull  bool
+	isHashKey  bool //is for sharding
 }
 
 // Rename allows you to specify the column name in the table
@@ -715,6 +736,7 @@ func (m *DbMap) AddTableWithNameAndSchema(i interface{}, schema string, name str
 	}
 
 	tmap := &TableMap{gotype: t, TableName: name, SchemaName: schema, dbmap: m}
+	tmap.shard = &HashShard{ShardNum: 10}
 	tmap.Columns, tmap.version = m.readStructColumns(t)
 	m.tables = append(m.tables, tmap)
 

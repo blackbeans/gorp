@@ -225,6 +225,10 @@ func (t *TableMap) SetHashKey(fieldName string) *TableMap {
 	return t
 }
 
+func (t *TableMap) GetShardCnt() int {
+	return t.shard.ShardCnt()
+}
+
 func (t *TableMap) SetShardStrategy(shard Shard) *TableMap {
 	t.shard = shard
 	return t
@@ -844,13 +848,14 @@ func (m *DbMap) createTables(ifNotExists bool) error {
 			s.WriteString(fmt.Sprintf(" %s;", table.SchemaName))
 		}
 
+		tableName := table.TableName + "_{}"
 		tableCreate := "create table"
 		if ifNotExists {
-			s.WriteString(m.Dialect.IfTableNotExists(tableCreate, table.SchemaName, table.TableName))
+			s.WriteString(m.Dialect.IfTableNotExists(tableCreate, table.SchemaName, tableName))
 		} else {
 			s.WriteString(tableCreate)
 		}
-		s.WriteString(fmt.Sprintf(" %s (", m.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)))
+		s.WriteString(fmt.Sprintf(" %s (", m.Dialect.QuotedTableForQuery(table.SchemaName, tableName)))
 
 		x := 0
 		for _, col := range table.Columns {
@@ -902,9 +907,12 @@ func (m *DbMap) createTables(ifNotExists bool) error {
 		s.WriteString(") ")
 		s.WriteString(m.Dialect.CreateTableSuffix())
 		s.WriteString(m.Dialect.QuerySuffix())
-		_, err = m.Exec(s.String())
-		if err != nil {
-			break
+
+		totalShardCnt := table.GetShardCnt()
+		shardId := 0
+		for shardId < totalShardCnt {
+			m.Exec(strings.Replace(s.String(), "{}", strconv.Itoa(shardId), -1))
+			shardId++
 		}
 	}
 	return err

@@ -7,6 +7,7 @@ import (
 
 type Shard interface {
 	FindForKey(key interface{}) int
+	ShardCnt() int
 }
 
 type HashShard struct {
@@ -16,6 +17,10 @@ type HashShard struct {
 func (s *HashShard) FindForKey(key interface{}) int {
 	h := HashValue(key)
 	return int(h % uint64(s.ShardNum))
+}
+
+func (s *HashShard) ShardCnt() int {
+	return s.ShardNum
 }
 
 func HashValue(value interface{}) uint64 {

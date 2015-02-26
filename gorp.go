@@ -307,7 +307,6 @@ func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter, 
 	//get query by hash key
 	hashKey := elem.FieldByName(t.hashKey.fieldName).Interface()
 	shardId := t.shard.FindForKey(hashKey)
-	fmt.Println("createBindInstance hashKey:%s shardId:%s", hashKey, shardId)
 
 	bi := bindInstance{query: plan.queries[shardId], autoIncrIdx: plan.autoIncrIdx, autoIncrFieldName: plan.autoIncrFieldName, versField: plan.versField}
 	if plan.versField != "" {
@@ -1913,7 +1912,6 @@ func get(m *DbMap, exec SqlExecutor, i interface{}, hashKey interface{},
 		dest[x] = target
 	}
 
-	//todo
 	shardId := table.shard.FindForKey(hashKey)
 	row := exec.queryRow(plan.queries[shardId], keys...)
 
@@ -2010,7 +2008,6 @@ func update(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 		if err != nil {
 			return -1, err
 		}
-
 		res, err := exec.Exec(bi.query, bi.args...)
 		if err != nil {
 			return -1, err

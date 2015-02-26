@@ -305,8 +305,9 @@ type bindPlan struct {
 func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter, t *TableMap) (bindInstance, error) {
 
 	//get query by hash key
-	hashKey := elem.FieldByName(t.hashKey.ColumnName).Interface()
+	hashKey := elem.FieldByName(t.hashKey.fieldName).Interface()
 	shardId := t.shard.FindForKey(hashKey)
+	fmt.Println("createBindInstance hashKey:%s shardId:%s", hashKey, shardId)
 
 	bi := bindInstance{query: plan.queries[shardId], autoIncrIdx: plan.autoIncrIdx, autoIncrFieldName: plan.autoIncrFieldName, versField: plan.versField}
 	if plan.versField != "" {
@@ -426,7 +427,7 @@ func (t *TableMap) bindUpdate(elem reflect.Value) (bindInstance, error) {
 	if plan.queries == nil {
 
 		s := bytes.Buffer{}
-		s.WriteString(fmt.Sprintf("update %s set ", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
+		//s.WriteString(fmt.Sprintf("update %s set ", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
 		x := 0
 
 		for y := range t.Columns {
@@ -472,8 +473,10 @@ func (t *TableMap) bindUpdate(elem reflect.Value) (bindInstance, error) {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.queries = make([]string, 1)
-		plan.queries[0] = s.String()
+		plan.queries = make([]string, t.shard.ShardCnt())
+		for index, _ := range plan.queries {
+			plan.queries[index] = fmt.Sprintf("update %s set ", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_"+strconv.Itoa(index))) + s.String()
+		}
 		t.updatePlan = plan
 	}
 
@@ -485,7 +488,7 @@ func (t *TableMap) bindDelete(elem reflect.Value) (bindInstance, error) {
 	if plan.queries == nil {
 
 		s := bytes.Buffer{}
-		s.WriteString(fmt.Sprintf("delete from %s", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
+		//s.WriteString(fmt.Sprintf("delete from %s", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
 
 		for y := range t.Columns {
 			col := t.Columns[y]
@@ -519,8 +522,10 @@ func (t *TableMap) bindDelete(elem reflect.Value) (bindInstance, error) {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.queries = make([]string, 1)
-		plan.queries[0] = s.String()
+		plan.queries = make([]string, t.shard.ShardCnt())
+		for index, _ := range plan.queries {
+			plan.queries[index] = fmt.Sprintf("delete from %s ", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_"+strconv.Itoa(index))) + s.String()
+		}
 		t.deletePlan = plan
 	}
 

@@ -551,7 +551,7 @@ func (t *TableMap) bindGet() bindPlan {
 			}
 		}
 		s.WriteString(" from ")
-		s.WriteString(t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName))
+		s.WriteString(t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_{}"))
 		s.WriteString(" where ")
 		for x := range t.keys {
 			col := t.keys[x]
@@ -566,8 +566,10 @@ func (t *TableMap) bindGet() bindPlan {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.queries = make([]string, 1)
-		plan.queries[0] = s.String()
+		plan.queries = make([]string, t.shard.ShardCnt())
+		for index, _ := range plan.queries {
+			plan.queries[index] = strings.Replace(s.String(), "{}", strconv.Itoa(index), -1)
+		}
 		t.getPlan = plan
 	}
 
@@ -663,7 +665,7 @@ type executor interface {
 // See the DbMap function docs for each of the functions below for more
 // information.
 type SqlExecutor interface {
-	Get(i interface{}, keys ...interface{}) (interface{}, error)
+	Get(i interface{}, hashKey interface{}, keys ...interface{}) (interface{}, error)
 	Insert(list ...interface{}) error
 	Update(list ...interface{}) (int64, error)
 	Delete(list ...interface{}) (int64, error)
@@ -1060,8 +1062,8 @@ func (m *DbMap) Delete(list ...interface{}) (int64, error) {
 //
 // Returns an error if SetKeys has not been called on the TableMap
 // Panics if any interface in the list has not been registered with AddTable
-func (m *DbMap) Get(i interface{}, keys ...interface{}) (interface{}, error) {
-	return get(m, m, i, keys...)
+func (m *DbMap) Get(i interface{}, hashKey interface{}, keys ...interface{}) (interface{}, error) {
+	return get(m, m, i, hashKey, keys...)
 }
 
 // Select runs an arbitrary SQL query, binding the columns in the result
@@ -1251,8 +1253,8 @@ func (t *Transaction) Delete(list ...interface{}) (int64, error) {
 }
 
 // Get has the same behavior as DbMap.Get(), but runs in a transaction.
-func (t *Transaction) Get(i interface{}, keys ...interface{}) (interface{}, error) {
-	return get(t.dbmap, t, i, keys...)
+func (t *Transaction) Get(i interface{}, hashKey interface{}, keys ...interface{}) (interface{}, error) {
+	return get(t.dbmap, t, i, hashKey, keys...)
 }
 
 // Select has the same behavior as DbMap.Select(), but runs in a transaction.
@@ -1877,7 +1879,7 @@ func toType(i interface{}) (reflect.Type, error) {
 	return t, nil
 }
 
-func get(m *DbMap, exec SqlExecutor, i interface{},
+func get(m *DbMap, exec SqlExecutor, i interface{}, hashKey interface{},
 	keys ...interface{}) (interface{}, error) {
 
 	t, err := toType(i)
@@ -1912,7 +1914,9 @@ func get(m *DbMap, exec SqlExecutor, i interface{},
 	}
 
 	//todo
-	row := exec.queryRow(plan.queries[0], keys...)
+	shardId := table.shard.FindForKey(hashKey)
+	row := exec.queryRow(plan.queries[shardId], keys...)
+
 	err = row.Scan(dest...)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1969,7 +1973,7 @@ func delete(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 		}
 
 		if rows == 0 && bi.existingVersion > 0 {
-			return lockError(m, exec, table.TableName,
+			return lockError(m, table, exec, table.TableName,
 				bi.existingVersion, elem, bi.keys...)
 		}
 
@@ -2018,7 +2022,7 @@ func update(m *DbMap, exec SqlExecutor, list ...interface{}) (int64, error) {
 		}
 
 		if rows == 0 && bi.existingVersion > 0 {
-			return lockError(m, exec, table.TableName,
+			return lockError(m, table, exec, table.TableName,
 				bi.existingVersion, elem, bi.keys...)
 		}
 
@@ -2099,11 +2103,13 @@ func insert(m *DbMap, exec SqlExecutor, list ...interface{}) error {
 	return nil
 }
 
-func lockError(m *DbMap, exec SqlExecutor, tableName string,
+func lockError(m *DbMap, table *TableMap, exec SqlExecutor, tableName string,
 	existingVer int64, elem reflect.Value,
 	keys ...interface{}) (int64, error) {
 
-	existing, err := get(m, exec, elem.Interface(), keys...)
+	//get hashkey
+	hashKey := elem.FieldByName(table.hashKey.fieldName).Interface()
+	existing, err := get(m, exec, elem.Interface(), hashKey, keys...)
 	if err != nil {
 		return -1, err
 	}

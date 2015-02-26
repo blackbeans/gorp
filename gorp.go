@@ -294,7 +294,7 @@ func (t *TableMap) SetVersionCol(field string) *ColumnMap {
 }
 
 type bindPlan struct {
-	query             string
+	queries           []string // sharding by table granularity
 	argFields         []string
 	keyFields         []string
 	versField         string
@@ -302,8 +302,13 @@ type bindPlan struct {
 	autoIncrFieldName string
 }
 
-func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter) (bindInstance, error) {
-	bi := bindInstance{query: plan.query, autoIncrIdx: plan.autoIncrIdx, autoIncrFieldName: plan.autoIncrFieldName, versField: plan.versField}
+func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter, t *TableMap) (bindInstance, error) {
+
+	//get query by hash key
+	hashKey := elem.FieldByName(t.hashKey.ColumnName).Interface()
+	shardId := t.shard.FindForKey(hashKey)
+
+	bi := bindInstance{query: plan.queries[shardId], autoIncrIdx: plan.autoIncrIdx, autoIncrFieldName: plan.autoIncrFieldName, versField: plan.versField}
 	if plan.versField != "" {
 		bi.existingVersion = elem.FieldByName(plan.versField).Int()
 	}
@@ -357,14 +362,13 @@ type bindInstance struct {
 
 func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 	plan := t.insertPlan
-	if plan.query == "" {
+	if plan.queries == nil {
 		plan.autoIncrIdx = -1
 
 		s := bytes.Buffer{}
 		s2 := bytes.Buffer{}
 		//s.WriteString(fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
 
-		tableSuffix := 0
 		x := 0
 		first := true
 		for y := range t.Columns {
@@ -376,10 +380,6 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 						s2.WriteString(",")
 					}
 					s.WriteString(t.dbmap.Dialect.QuoteField(col.ColumnName))
-
-					if col.isHashKey {
-						tableSuffix = t.shard.FindForKey(t.dbmap.Dialect.BindVar(x))
-					}
 
 					if col.isAutoIncr {
 						s2.WriteString(t.dbmap.Dialect.AutoIncrBindValue())
@@ -411,16 +411,19 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.query = fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_"+strconv.Itoa(tableSuffix))) + s.String()
+		plan.queries = make([]string, t.shard.ShardCnt())
+		for index, _ := range plan.queries {
+			plan.queries[index] = fmt.Sprintf("insert into %s (", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_"+strconv.Itoa(index))) + s.String()
+		}
 		t.insertPlan = plan
 	}
 
-	return plan.createBindInstance(elem, t.dbmap.TypeConverter)
+	return plan.createBindInstance(elem, t.dbmap.TypeConverter, t)
 }
 
 func (t *TableMap) bindUpdate(elem reflect.Value) (bindInstance, error) {
 	plan := t.updatePlan
-	if plan.query == "" {
+	if plan.queries == nil {
 
 		s := bytes.Buffer{}
 		s.WriteString(fmt.Sprintf("update %s set ", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
@@ -469,16 +472,17 @@ func (t *TableMap) bindUpdate(elem reflect.Value) (bindInstance, error) {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.query = s.String()
+		plan.queries = make([]string, 1)
+		plan.queries[0] = s.String()
 		t.updatePlan = plan
 	}
 
-	return plan.createBindInstance(elem, t.dbmap.TypeConverter)
+	return plan.createBindInstance(elem, t.dbmap.TypeConverter, t)
 }
 
 func (t *TableMap) bindDelete(elem reflect.Value) (bindInstance, error) {
 	plan := t.deletePlan
-	if plan.query == "" {
+	if plan.queries == nil {
 
 		s := bytes.Buffer{}
 		s.WriteString(fmt.Sprintf("delete from %s", t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName)))
@@ -515,16 +519,17 @@ func (t *TableMap) bindDelete(elem reflect.Value) (bindInstance, error) {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.query = s.String()
+		plan.queries = make([]string, 1)
+		plan.queries[0] = s.String()
 		t.deletePlan = plan
 	}
 
-	return plan.createBindInstance(elem, t.dbmap.TypeConverter)
+	return plan.createBindInstance(elem, t.dbmap.TypeConverter, t)
 }
 
 func (t *TableMap) bindGet() bindPlan {
 	plan := t.getPlan
-	if plan.query == "" {
+	if plan.queries == nil {
 
 		s := bytes.Buffer{}
 		s.WriteString("select ")
@@ -556,7 +561,8 @@ func (t *TableMap) bindGet() bindPlan {
 		}
 		s.WriteString(t.dbmap.Dialect.QuerySuffix())
 
-		plan.query = s.String()
+		plan.queries = make([]string, 1)
+		plan.queries[0] = s.String()
 		t.getPlan = plan
 	}
 
@@ -1900,7 +1906,8 @@ func get(m *DbMap, exec SqlExecutor, i interface{},
 		dest[x] = target
 	}
 
-	row := exec.queryRow(plan.query, keys...)
+	//todo
+	row := exec.queryRow(plan.queries[0], keys...)
 	err = row.Scan(dest...)
 	if err != nil {
 		if err == sql.ErrNoRows {

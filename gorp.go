@@ -177,6 +177,7 @@ type TableMap struct {
 	updatePlan     bindPlan
 	deletePlan     bindPlan
 	getPlan        bindPlan
+	selectPlan     map[string]bindPlan
 	dbmap          *DbMap
 
 	hashKey *ColumnMap //for sharding
@@ -191,6 +192,7 @@ func (t *TableMap) ResetSql() {
 	t.updatePlan = bindPlan{}
 	t.deletePlan = bindPlan{}
 	t.getPlan = bindPlan{}
+	t.selectPlan = make(map[string]bindPlan)
 }
 
 // SetKeys lets you specify the fields on a struct that map to primary
@@ -419,6 +421,60 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 	}
 
 	return plan.createBindInstance(elem, t.dbmap.TypeConverter, t)
+}
+
+func (t *TableMap) bindBatchGet(elem reflect.Value, cond []*Cond, offset, limit int32) bindPlan {
+	//build plan key by condition fields' name
+	planKeyBuf := bytes.Buffer{}
+	for _, c := range cond {
+		planKeyBuf.WriteString(c.Field)
+	}
+
+	planKey := planKeyBuf.String()
+	fmt.Println("planeKey", planKey)
+	plan := t.selectPlan[planKey]
+	if plan.queries == nil {
+		s := bytes.Buffer{}
+		s.WriteString("select ")
+		x := 0
+		for _, col := range t.Columns {
+			if !col.Transient {
+				if x > 0 {
+					s.WriteString(",")
+				}
+				s.WriteString(t.dbmap.Dialect.QuoteField(col.ColumnName))
+				plan.argFields = append(plan.argFields, col.fieldName)
+				x++
+			}
+		}
+		s.WriteString(" from ")
+		s.WriteString(t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_{}"))
+		s.WriteString(" where ")
+		x = 0
+		for _, c := range cond {
+			if x > 0 {
+				s.WriteString(" and ")
+			}
+			s.WriteString(c.Field)
+			s.WriteString(c.Operator)
+			s.WriteString(t.dbmap.Dialect.BindVar(x))
+
+			plan.keyFields = append(plan.keyFields, c.Field)
+			x++
+		}
+
+		s.WriteString(" limit ")
+		s.WriteString(strconv.Itoa(int(offset)))
+		s.WriteString(",")
+		s.WriteString(strconv.Itoa(int(limit)))
+		s.WriteString(t.dbmap.Dialect.QuerySuffix())
+
+		plan.queries = make([]string, t.shard.ShardCnt())
+		for index, _ := range plan.queries {
+			plan.queries[index] = strings.Replace(s.String(), "{}", strconv.Itoa(index), -1)
+		}
+	}
+	return plan
 }
 
 func (t *TableMap) bindUpdate(elem reflect.Value) (bindInstance, error) {
@@ -680,6 +736,8 @@ type SqlExecutor interface {
 	SelectOne(holder interface{}, query string, args ...interface{}) error
 	query(query string, args ...interface{}) (*sql.Rows, error)
 	queryRow(query string, args ...interface{}) *sql.Row
+
+	BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error)
 }
 
 // Compile-time check that DbMap and Transaction implement the SqlExecutor
@@ -1088,6 +1146,108 @@ func (m *DbMap) Select(i interface{}, query string, args ...interface{}) ([]inte
 	return hookedselect(m, m, i, query, args...)
 }
 
+func (m *DbMap) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
+	return batchGet(m, m, hashKey, offset, limit, inst, cond)
+}
+
+func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
+	fmt.Println("batchGet")
+	t, err := toType(inst)
+	if err != nil {
+		return nil, err
+	}
+
+	table, err := m.TableFor(t, true)
+	if err != nil {
+		return nil, err
+	}
+
+	v := reflect.New(t)
+	plan := table.bindBatchGet(v.Elem(), cond, offset, limit)
+	fmt.Println(plan)
+	shardId := table.shard.FindForKey(hashKey)
+	fmt.Println("BatchGet shardId:", shardId)
+
+	args := make([]interface{}, len(cond))
+	index := 0
+	for _, value := range cond {
+		args[index] = value.Value
+		index++
+	}
+	fmt.Println("batchGet", args)
+	rows, err := exec.query(plan.queries[shardId], args...)
+	if err != nil {
+		fmt.Println("query error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	fmt.Println("rows", rows)
+
+	// Fetch the column names as returned from db
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	var colToFieldIndex [][]int
+	if colToFieldIndex, err = columnToFieldIndex(m, t, cols); err != nil {
+		return nil, err
+	}
+
+	conv := m.TypeConverter
+
+	// Add results to
+	var list = make([]interface{}, 0)
+	for {
+		if !rows.Next() {
+			if rows.Err() != nil {
+				return nil, rows.Err()
+			}
+			break
+		}
+		v := reflect.New(t)
+		dest := make([]interface{}, len(cols))
+		custScan := make([]CustomScanner, 0)
+
+		for x := range cols {
+			f := v.Elem()
+			index := colToFieldIndex[x]
+			if index == nil {
+				// this field is not present in the struct, so create a dummy
+				// value for rows.Scan to scan into
+				var dummy sql.RawBytes
+				dest[x] = &dummy
+				continue
+			}
+			f = f.FieldByIndex(index)
+			target := f.Addr().Interface()
+			if conv != nil {
+				scanner, ok := conv.FromDb(target)
+				if ok {
+					target = scanner.Holder
+					custScan = append(custScan, scanner)
+				}
+			}
+			dest[x] = target
+		}
+
+		err = rows.Scan(dest...)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range custScan {
+			err = c.Bind()
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		list = append(list, v.Interface())
+	}
+	return list, nil
+}
+
 // Exec runs an arbitrary SQL statement.  args represent the bind parameters.
 // This is equivalent to running:  Exec() using database/sql
 func (m *DbMap) Exec(query string, args ...interface{}) (sql.Result, error) {
@@ -1249,6 +1409,10 @@ func (t *Transaction) Update(list ...interface{}) (int64, error) {
 // Delete has the same behavior as DbMap.Delete(), but runs in a transaction.
 func (t *Transaction) Delete(list ...interface{}) (int64, error) {
 	return delete(t.dbmap, t, list...)
+}
+
+func (t *Transaction) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
+	return batchGet(t.dbmap, t, hashKey, offset, limit, inst, cond)
 }
 
 // Get has the same behavior as DbMap.Get(), but runs in a transaction.
@@ -2151,4 +2315,10 @@ type HasPreUpdate interface {
 // PreInsert() will be executed before INSERT statement.
 type HasPreInsert interface {
 	PreInsert(SqlExecutor) error
+}
+
+type Cond struct {
+	Field    string
+	Value    interface{}
+	Operator string
 }

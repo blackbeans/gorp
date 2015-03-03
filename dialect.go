@@ -220,6 +220,8 @@ func (d PostgresDialect) ToSqlType(val reflect.Type, maxsize int, isAutoIncr boo
 		if val.Elem().Kind() == reflect.Uint8 {
 			return "bytea"
 		}
+	case reflect.Struct:
+		return "blob"
 	}
 
 	switch val.Name() {
@@ -351,6 +353,10 @@ func (d MySQLDialect) ToSqlType(val reflect.Type, maxsize int, isAutoIncr bool) 
 		if val.Elem().Kind() == reflect.Uint8 {
 			return "mediumblob"
 		}
+	case reflect.Struct:
+		return "mediumblob"
+	case reflect.Interface:
+		return "mediumblob"
 	}
 
 	switch val.Name() {

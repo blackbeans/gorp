@@ -107,7 +107,7 @@ func (e OptimisticLockError) Error() string {
 // or serialize a struct member as a JSON blob.
 type TypeConverter interface {
 	// ToDb converts val to another type. Called before INSERT/UPDATE operations
-	ToDb(val interface{}) (interface{}, error)
+	ToDb(val interface{}, fieldName string) (interface{}, error)
 
 	// FromDb returns a CustomScanner appropriate for this type. This will be used
 	// to hold values returned from SELECT queries.
@@ -116,7 +116,7 @@ type TypeConverter interface {
 	// function appropriate for the Go type you wish to convert the db value to
 	//
 	// If bool==false, then no custom scanner will be used for this field.
-	FromDb(target interface{}) (CustomScanner, bool)
+	FromDb(target interface{}, fieldName string) (CustomScanner, bool)
 }
 
 // CustomScanner binds a database column value to a Go type
@@ -328,7 +328,7 @@ func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter, 
 		} else {
 			val := elem.FieldByName(k).Interface()
 			if conv != nil {
-				val, err = conv.ToDb(val)
+				val, err = conv.ToDb(val, k)
 				if err != nil {
 					return bindInstance{}, err
 				}
@@ -341,7 +341,7 @@ func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter, 
 		k := plan.keyFields[i]
 		val := elem.FieldByName(k).Interface()
 		if conv != nil {
-			val, err = conv.ToDb(val)
+			val, err = conv.ToDb(val, k)
 			if err != nil {
 				return bindInstance{}, err
 			}
@@ -853,7 +853,7 @@ func (m *DbMap) readStructColumns(t reflect.Type) (cols []*ColumnMap, version *C
 				// if a different type should be used for the column
 				// type during table creation.
 				value := reflect.New(gotype).Interface()
-				scanner, useHolder := m.TypeConverter.FromDb(value)
+				scanner, useHolder := m.TypeConverter.FromDb(value, f.Name)
 				if useHolder {
 					gotype = reflect.TypeOf(scanner.Holder)
 				}
@@ -1151,7 +1151,6 @@ func (m *DbMap) BatchGet(hashKey string, offset int32, limit int32, inst interfa
 }
 
 func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
-	fmt.Println("batchGet")
 	t, err := toType(inst)
 	if err != nil {
 		return nil, err
@@ -1166,7 +1165,6 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 	plan := table.bindBatchGet(v.Elem(), cond, offset, limit)
 	fmt.Println(plan)
 	shardId := table.shard.FindForKey(hashKey)
-	fmt.Println("BatchGet shardId:", shardId)
 
 	args := make([]interface{}, len(cond))
 	index := 0
@@ -1174,15 +1172,12 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 		args[index] = value.Value
 		index++
 	}
-	fmt.Println("batchGet", args)
 	rows, err := exec.query(plan.queries[shardId], args...)
 	if err != nil {
 		fmt.Println("query error", err)
 		return nil, err
 	}
 	defer rows.Close()
-
-	fmt.Println("rows", rows)
 
 	// Fetch the column names as returned from db
 	cols, err := rows.Columns()
@@ -1223,7 +1218,7 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 			f = f.FieldByIndex(index)
 			target := f.Addr().Interface()
 			if conv != nil {
-				scanner, ok := conv.FromDb(target)
+				scanner, ok := conv.FromDb(target, t.Field(x).Name)
 				if ok {
 					target = scanner.Holder
 					custScan = append(custScan, scanner)
@@ -1231,7 +1226,6 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 			}
 			dest[x] = target
 		}
-
 		err = rows.Scan(dest...)
 		if err != nil {
 			return nil, err
@@ -1767,7 +1761,6 @@ func rawselect(m *DbMap, exec SqlExecutor, i interface{}, query string,
 	if len(args) == 1 {
 		query, args = maybeExpandNamedQuery(m, query, args)
 	}
-
 	// Run the query
 	rows, err := exec.query(query, args...)
 	if err != nil {
@@ -1832,7 +1825,7 @@ func rawselect(m *DbMap, exec SqlExecutor, i interface{}, query string,
 			}
 			target := f.Addr().Interface()
 			if conv != nil {
-				scanner, ok := conv.FromDb(target)
+				scanner, ok := conv.FromDb(target, t.Field(x).Name)
 				if ok {
 					target = scanner.Holder
 					custScan = append(custScan, scanner)
@@ -1840,7 +1833,7 @@ func rawselect(m *DbMap, exec SqlExecutor, i interface{}, query string,
 			}
 			dest[x] = target
 		}
-
+		fmt.Println("dest", dest)
 		err = rows.Scan(dest...)
 		if err != nil {
 			return nil, err
@@ -2067,7 +2060,7 @@ func get(m *DbMap, exec SqlExecutor, i interface{}, hashKey interface{},
 		f := v.Elem().FieldByName(fieldName)
 		target := f.Addr().Interface()
 		if conv != nil {
-			scanner, ok := conv.FromDb(target)
+			scanner, ok := conv.FromDb(target, fieldName)
 			if ok {
 				target = scanner.Holder
 				custScan = append(custScan, scanner)
@@ -2086,7 +2079,7 @@ func get(m *DbMap, exec SqlExecutor, i interface{}, hashKey interface{},
 		}
 		return nil, err
 	}
-
+	fmt.Println("after row.scan", dest)
 	for _, c := range custScan {
 		err = c.Bind()
 		if err != nil {
@@ -2100,7 +2093,6 @@ func get(m *DbMap, exec SqlExecutor, i interface{}, hashKey interface{},
 			return nil, err
 		}
 	}
-
 	return v.Interface(), nil
 }
 
@@ -2223,6 +2215,7 @@ func insert(m *DbMap, exec SqlExecutor, list ...interface{}) error {
 			return err
 		}
 
+		fmt.Println(bi.query, bi.args)
 		if bi.autoIncrIdx > -1 {
 			f := elem.FieldByName(bi.autoIncrFieldName)
 			switch inserter := m.Dialect.(type) {

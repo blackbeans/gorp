@@ -431,7 +431,6 @@ func (t *TableMap) bindBatchGet(elem reflect.Value, cond []*Cond, offset, limit 
 	}
 
 	planKey := planKeyBuf.String()
-	fmt.Println("planeKey", planKey)
 	plan := t.selectPlan[planKey]
 	if plan.queries == nil {
 		s := bytes.Buffer{}
@@ -1163,7 +1162,6 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 
 	v := reflect.New(t)
 	plan := table.bindBatchGet(v.Elem(), cond, offset, limit)
-	fmt.Println(plan)
 	shardId := table.shard.FindForKey(hashKey)
 
 	args := make([]interface{}, len(cond))
@@ -1833,7 +1831,6 @@ func rawselect(m *DbMap, exec SqlExecutor, i interface{}, query string,
 			}
 			dest[x] = target
 		}
-		fmt.Println("dest", dest)
 		err = rows.Scan(dest...)
 		if err != nil {
 			return nil, err
@@ -2079,7 +2076,6 @@ func get(m *DbMap, exec SqlExecutor, i interface{}, hashKey interface{},
 		}
 		return nil, err
 	}
-	fmt.Println("after row.scan", dest)
 	for _, c := range custScan {
 		err = c.Bind()
 		if err != nil {
@@ -2215,7 +2211,6 @@ func insert(m *DbMap, exec SqlExecutor, list ...interface{}) error {
 			return err
 		}
 
-		fmt.Println(bi.query, bi.args)
 		if bi.autoIncrIdx > -1 {
 			f := elem.FieldByName(bi.autoIncrFieldName)
 			switch inserter := m.Dialect.(type) {

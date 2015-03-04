@@ -166,19 +166,20 @@ type DbMap struct {
 // Use dbmap.AddTable() or dbmap.AddTableWithName() to create these
 type TableMap struct {
 	// Name of database table.
-	TableName      string
-	SchemaName     string
-	gotype         reflect.Type
-	Columns        []*ColumnMap
-	keys           []*ColumnMap
-	uniqueTogether [][]string
-	version        *ColumnMap
-	insertPlan     bindPlan
-	updatePlan     bindPlan
-	deletePlan     bindPlan
-	getPlan        bindPlan
-	selectPlan     map[string]bindPlan
-	dbmap          *DbMap
+	TableName          string
+	SchemaName         string
+	gotype             reflect.Type
+	Columns            []*ColumnMap
+	keys               []*ColumnMap
+	uniqueTogether     [][]string
+	version            *ColumnMap
+	insertPlan         bindPlan
+	updatePlan         bindPlan
+	deletePlan         bindPlan
+	getPlan            bindPlan
+	selectPlan         map[string]bindPlan
+	updateByColumnPlan map[string]bindPlan
+	dbmap              *DbMap
 
 	hashKey *ColumnMap //for sharding
 	shard   Shard      //sharding strategy.
@@ -316,7 +317,6 @@ func (plan bindPlan) createBindInstance(elem reflect.Value, conv TypeConverter, 
 	}
 
 	var err error
-
 	for i := 0; i < len(plan.argFields); i++ {
 		k := plan.argFields[i]
 		if k == versFieldConst {
@@ -454,7 +454,7 @@ func (t *TableMap) bindBatchGet(elem reflect.Value, cond []*Cond, offset, limit 
 			if x > 0 {
 				s.WriteString(" and ")
 			}
-			s.WriteString(c.Field)
+			s.WriteString(t.ColMap(c.Field).ColumnName)
 			s.WriteString(c.Operator)
 			s.WriteString(t.dbmap.Dialect.BindVar(x))
 
@@ -535,6 +535,60 @@ func (t *TableMap) bindUpdate(elem reflect.Value) (bindInstance, error) {
 	}
 
 	return plan.createBindInstance(elem, t.dbmap.TypeConverter, t)
+}
+
+func (t *TableMap) bindUpdateByColumns(elem reflect.Value, cond UpdateCond) bindPlan {
+	//build plan key by update columns
+	planKeyBuf := bytes.Buffer{}
+	for k, _ := range cond.Values {
+		planKeyBuf.WriteString(k)
+	}
+	for _, c := range cond.Cond {
+		planKeyBuf.WriteString(c.Field)
+	}
+	planKey := planKeyBuf.String()
+
+	plan := t.updateByColumnPlan[planKey]
+	if plan.queries == nil {
+		s := bytes.Buffer{}
+		s.WriteString("update ")
+		s.WriteString(t.dbmap.Dialect.QuotedTableForQuery(t.SchemaName, t.TableName+"_{}"))
+		s.WriteString(" set ")
+		x := 0
+		for k, _ := range cond.Values {
+			if x > 0 {
+				s.WriteString(", ")
+			}
+			s.WriteString(t.ColMap(k).ColumnName)
+			s.WriteString(" = ")
+			s.WriteString(t.dbmap.Dialect.BindVar(x))
+			//we need field name of struct here
+			plan.argFields = append(plan.argFields, k)
+			x++
+		}
+
+		s.WriteString(" where ")
+		x = 0
+		for _, c := range cond.Cond {
+			if x > 0 {
+				s.WriteString(" and ")
+			}
+			s.WriteString(t.ColMap(c.Field).ColumnName)
+			s.WriteString(c.Operator)
+			s.WriteString(t.dbmap.Dialect.BindVar(x))
+
+			plan.keyFields = append(plan.keyFields, c.Field)
+			x++
+		}
+		s.WriteString(t.dbmap.Dialect.QuerySuffix())
+
+		plan.queries = make([]string, t.shard.ShardCnt())
+		for index, _ := range plan.queries {
+			plan.queries[index] = strings.Replace(s.String(), "{}", strconv.Itoa(index), -1)
+		}
+	}
+
+	return plan
 }
 
 func (t *TableMap) bindDelete(elem reflect.Value) (bindInstance, error) {
@@ -737,6 +791,7 @@ type SqlExecutor interface {
 	queryRow(query string, args ...interface{}) *sql.Row
 
 	BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error)
+	UpdateByColumn(id string, hashkey string, cond UpdateCond) (int64, error)
 }
 
 // Compile-time check that DbMap and Transaction implement the SqlExecutor
@@ -1145,6 +1200,69 @@ func (m *DbMap) Select(i interface{}, query string, args ...interface{}) ([]inte
 	return hookedselect(m, m, i, query, args...)
 }
 
+func (m *DbMap) UpdateByColumn(id string, hashkey string, cond UpdateCond) (int64, error) {
+	return updateByColumn(m, m, id, hashkey, cond)
+}
+
+func updateByColumn(m *DbMap, exec SqlExecutor, id string, hashKey string, cond UpdateCond) (int64, error) {
+	count := int64(0)
+	table, elem, err := m.tableForPointer(cond.Ptr, true)
+	if err != nil {
+		return -1, err
+	}
+
+	eval := elem.Addr().Interface()
+	if v, ok := eval.(HasPreUpdate); ok {
+		err = v.PreUpdate(exec)
+		if err != nil {
+			return -1, err
+		}
+	}
+
+	plan := table.bindUpdateByColumns(elem, cond)
+	shardId := table.shard.FindForKey(hashKey)
+	args := make([]interface{}, len(plan.argFields)+len(plan.keyFields))
+	index := 0
+	for _, k := range plan.argFields {
+		args[index] = cond.Values[k]
+		index++
+	}
+	for condIndex, _ := range plan.keyFields {
+		args[index] = cond.Cond[condIndex].Value
+		index++
+		condIndex++
+	}
+
+	res, err := exec.Exec(plan.queries[shardId], args...)
+
+	if err != nil {
+		return -1, err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return -1, err
+	}
+
+	//	if rows == 0 && bi.existingVersion > 0 {
+	//		return lockError(m, table, exec, table.TableName,
+	//			bi.existingVersion, elem, bi.keys...)
+	//	}
+
+	//if bi.versField != "" {
+	//	elem.FieldByName(bi.versField).SetInt(bi.existingVersion + 1)
+	//}
+
+	count += rows
+
+	if v, ok := eval.(HasPostUpdate); ok {
+		err = v.PostUpdate(exec)
+		if err != nil {
+			return -1, err
+		}
+	}
+	return count, nil
+}
+
 func (m *DbMap) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
 	return batchGet(m, m, hashKey, offset, limit, inst, cond)
 }
@@ -1405,6 +1523,10 @@ func (t *Transaction) Delete(list ...interface{}) (int64, error) {
 
 func (t *Transaction) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
 	return batchGet(t.dbmap, t, hashKey, offset, limit, inst, cond)
+}
+
+func (t *Transaction) UpdateByColumn(id string, hashkey string, cond UpdateCond) (int64, error) {
+	return updateByColumn(t.dbmap, t, id, hashkey, cond)
 }
 
 // Get has the same behavior as DbMap.Get(), but runs in a transaction.
@@ -2309,4 +2431,10 @@ type Cond struct {
 	Field    string
 	Value    interface{}
 	Operator string
+}
+
+type UpdateCond struct {
+	Values map[string]interface{}
+	Cond   []Cond
+	Ptr    interface{}
 }

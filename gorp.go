@@ -423,7 +423,7 @@ func (t *TableMap) bindInsert(elem reflect.Value) (bindInstance, error) {
 	return plan.createBindInstance(elem, t.dbmap.TypeConverter, t)
 }
 
-func (t *TableMap) bindBatchGet(elem reflect.Value, cond []*Cond, offset, limit int32) bindPlan {
+func (t *TableMap) bindBatchGet(cond []*Cond, columnFilter func(col string) bool, offset, limit int32) bindPlan {
 	//build plan key by condition fields' name
 	planKeyBuf := bytes.Buffer{}
 	for _, c := range cond {
@@ -437,7 +437,7 @@ func (t *TableMap) bindBatchGet(elem reflect.Value, cond []*Cond, offset, limit 
 		s.WriteString("select ")
 		x := 0
 		for _, col := range t.Columns {
-			if !col.Transient {
+			if !col.Transient || columnFilter(col.ColumnName) {
 				if x > 0 {
 					s.WriteString(",")
 				}
@@ -1279,8 +1279,8 @@ func updateByColumn(m *DbMap, exec SqlExecutor, id string, hashKey string, cond 
 	return count, nil
 }
 
-var emptyColumnsFilter = func(columns []string) []string {
-	return columns
+var emptyColumnsFilter = func(columns string) bool {
+	return false
 }
 
 func (m *DbMap) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
@@ -1289,12 +1289,12 @@ func (m *DbMap) BatchGet(hashKey string, offset int32, limit int32, inst interfa
 
 //batch query with fixed colums
 func (m *DbMap) BatchQuery(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond,
-	columnFilter func(column []string) []string) ([]interface{}, error) {
+	columnFilter func(col string) bool) ([]interface{}, error) {
 	return batchGet(m, m, hashKey, offset, limit, inst, cond, columnFilter)
 }
 
 func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond,
-	columnFilter func(colums []string) []string) ([]interface{}, error) {
+	columnFilter func(col string) bool) ([]interface{}, error) {
 	t, err := toType(inst)
 	if err != nil {
 		return nil, err
@@ -1305,8 +1305,7 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 		return nil, err
 	}
 
-	v := reflect.New(t)
-	plan := table.bindBatchGet(v.Elem(), cond, offset, limit)
+	plan := table.bindBatchGet(cond, columnFilter, offset, limit)
 	shardId := table.shard.FindForKey(hashKey)
 
 	args := make([]interface{}, len(cond))
@@ -1328,8 +1327,6 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 		return nil, err
 	}
 
-	//filter colums
-	cols = columnFilter(cols)
 	var colToFieldIndex [][]int
 	if colToFieldIndex, err = columnToFieldIndex(m, t, cols); err != nil {
 		return nil, err
@@ -1555,7 +1552,7 @@ func (t *Transaction) BatchGet(hashKey string, offset int32, limit int32, inst i
 }
 
 func (t *Transaction) BatchQuery(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond,
-	columnsFilter func(cols []string) []string) ([]interface{}, error) {
+	columnsFilter func(cols string) bool) ([]interface{}, error) {
 	return batchGet(t.dbmap, t, hashKey, offset, limit, inst, cond, columnsFilter)
 }
 

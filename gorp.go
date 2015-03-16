@@ -864,7 +864,6 @@ func (m *DbMap) AddTableWithNameAndSchema(i interface{}, schema string, name str
 	}
 
 	tmap := &TableMap{gotype: t, TableName: name, SchemaName: schema, dbmap: m}
-	tmap.shard = &HashShard{ShardNum: 10}
 	tmap.Columns, tmap.version = m.readStructColumns(t)
 	m.tables = append(m.tables, tmap)
 
@@ -1092,11 +1091,23 @@ func (m *DbMap) dropTable(t reflect.Type, addIfExists bool) error {
 }
 
 func (m *DbMap) dropTableImpl(table *TableMap, ifExists bool) (err error) {
-	tableDrop := "drop table"
-	if ifExists {
-		tableDrop = m.Dialect.IfTableExists(tableDrop, table.SchemaName, table.TableName)
+
+	dropFunc := func(tableName string) error {
+		tableDrop := "drop table"
+		if ifExists {
+			tableDrop = m.Dialect.IfTableExists(tableDrop, table.SchemaName, tableName)
+		}
+		_, err = m.Exec(fmt.Sprintf("%s %s;", tableDrop, m.Dialect.QuotedTableForQuery(table.SchemaName, tableName)))
+		return err
 	}
-	_, err = m.Exec(fmt.Sprintf("%s %s;", tableDrop, m.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)))
+
+	sc := table.GetShardCnt()
+	for j := 0; j < sc; j++ {
+		tableName := table.TableName + "_{}"
+		tn := strings.Replace(tableName, "{}", strconv.Itoa(j), -1)
+		err = dropFunc(tn)
+	}
+
 	return err
 }
 
@@ -1108,9 +1119,14 @@ func (m *DbMap) TruncateTables() error {
 	var err error
 	for i := range m.tables {
 		table := m.tables[i]
-		_, e := m.Exec(fmt.Sprintf("%s %s;", m.Dialect.TruncateClause(), m.Dialect.QuotedTableForQuery(table.SchemaName, table.TableName)))
-		if e != nil {
-			err = e
+		sc := table.GetShardCnt()
+		for j := 0; j < sc; j++ {
+			tableName := table.TableName + "_{}"
+			tn := strings.Replace(tableName, "{}", strconv.Itoa(j), -1)
+			_, e := m.Exec(fmt.Sprintf("%s %s;", m.Dialect.TruncateClause(), m.Dialect.QuotedTableForQuery(table.SchemaName, tn)))
+			if e != nil {
+				err = e
+			}
 		}
 	}
 	return err

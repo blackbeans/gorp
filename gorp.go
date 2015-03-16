@@ -1279,11 +1279,22 @@ func updateByColumn(m *DbMap, exec SqlExecutor, id string, hashKey string, cond 
 	return count, nil
 }
 
-func (m *DbMap) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
-	return batchGet(m, m, hashKey, offset, limit, inst, cond)
+var emptyColumnsFilter = func(columns []string) []string {
+	return columns
 }
 
-func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
+func (m *DbMap) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
+	return batchGet(m, m, hashKey, offset, limit, inst, cond, emptyColumnsFilter)
+}
+
+//batch query with fixed colums
+func (m *DbMap) BatchQuery(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond,
+	columnFilter func(column []string) []string) ([]interface{}, error) {
+	return batchGet(m, m, hashKey, offset, limit, inst, cond, columnFilter)
+}
+
+func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond,
+	columnFilter func(colums []string) []string) ([]interface{}, error) {
 	t, err := toType(inst)
 	if err != nil {
 		return nil, err
@@ -1317,6 +1328,8 @@ func batchGet(m *DbMap, exec SqlExecutor, hashKey string, offset int32, limit in
 		return nil, err
 	}
 
+	//filter colums
+	cols = columnFilter(cols)
 	var colToFieldIndex [][]int
 	if colToFieldIndex, err = columnToFieldIndex(m, t, cols); err != nil {
 		return nil, err
@@ -1538,7 +1551,12 @@ func (t *Transaction) Delete(list ...interface{}) (int64, error) {
 }
 
 func (t *Transaction) BatchGet(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond) ([]interface{}, error) {
-	return batchGet(t.dbmap, t, hashKey, offset, limit, inst, cond)
+	return batchGet(t.dbmap, t, hashKey, offset, limit, inst, cond, emptyColumnsFilter)
+}
+
+func (t *Transaction) BatchQuery(hashKey string, offset int32, limit int32, inst interface{}, cond []*Cond,
+	columnsFilter func(cols []string) []string) ([]interface{}, error) {
+	return batchGet(t.dbmap, t, hashKey, offset, limit, inst, cond, columnsFilter)
 }
 
 func (t *Transaction) UpdateByColumn(id string, hashkey string, cond UpdateCond) (int64, error) {
